@@ -2,7 +2,7 @@
 <html lang="ja"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>コイル・バクテリア（試作 v3）</title>
+<title>コイル・バクテリア（試作 v4）</title>
 <style>html,body{margin:0;height:100%;background:#020615;overflow:hidden;overscroll-behavior:none;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
 canvas{display:block;width:100vw;height:100vh;cursor:none;touch-action:none}</style>
 </head><body><canvas id="c"></canvas><script>
@@ -88,7 +88,9 @@ const CAPGLOW=glowSprite(24,'rgba(120,255,170,0.7)');
 
 // ---------- input ----------
 const keys=new Set();let mdown=false,mx=0,my=0,mouseUsed=false,dashTouch=null,steerTouch=null;
+let tapCand=null; // {id,x,y,t,moved,savedMx,savedMy} short-tap → dash without yanking aim
 mx=W/2+100;my=H/2;
+const TAP_MS=200,TAP_MOVE=18;
 addEventListener('mouseup',()=>mdown=false);
 addEventListener('mousemove',e=>{mx=e.clientX;my=e.clientY;mouseUsed=true;});
 addEventListener('keydown',e=>{
@@ -104,15 +106,61 @@ cv.addEventListener('mousedown',e=>{mx=e.clientX;my=e.clientY;if(e.button===0){m
 cv.addEventListener('contextmenu',e=>e.preventDefault());
 function dashBtn(){return{x:W-74,y:H-96,r:46};}
 function inDashBtn(x,y){const b=dashBtn();return Math.hypot(x-b.x,y-b.y)<b.r+16;}
+function promoteSteer(tc){
+  if(!tc||tc.moved)return;
+  tc.moved=true;mx=tc.x;my=tc.y;mouseUsed=true;
+}
 cv.addEventListener('touchstart',e=>{
   TOUCH=true;e.preventDefault();
   for(const t of e.changedTouches){
     if(state==='play'&&inDashBtn(t.clientX,t.clientY)){dashTouch=t.identifier;mdown=true;dash();}
-    else{steerTouch=t.identifier;mx=t.clientX;my=t.clientY;mouseUsed=true;if(state!=='play')act('tap');}
+    else if(state==='play'&&steerTouch!==null&&t.identifier!==steerTouch){
+      // second finger anywhere → dash (keep existing feel)
+      dashTouch=t.identifier;mdown=true;dash();
+    }
+    else if(state==='play'){
+      // defer aim until drag/hold so a quick tap-dash won't yank steering
+      steerTouch=t.identifier;
+      tapCand={id:t.identifier,sx:t.clientX,sy:t.clientY,x:t.clientX,y:t.clientY,t:performance.now(),moved:false,savedMx:mx,savedMy:my};
+    }
+    else{steerTouch=t.identifier;mx=t.clientX;my=t.clientY;mouseUsed=true;act('tap');}
   }},{passive:false});
-cv.addEventListener('touchmove',e=>{e.preventDefault();for(const t of e.changedTouches)if(t.identifier===steerTouch){mx=t.clientX;my=t.clientY;}},{passive:false});
-function tEnd(e){for(const t of e.changedTouches){if(t.identifier===dashTouch){dashTouch=null;mdown=false;}if(t.identifier===steerTouch)steerTouch=null;}}
+cv.addEventListener('touchmove',e=>{
+  e.preventDefault();
+  for(const t of e.changedTouches){
+    if(t.identifier!==steerTouch)continue;
+    if(tapCand&&tapCand.id===t.identifier&&!tapCand.moved){
+      tapCand.x=t.clientX;tapCand.y=t.clientY;
+      const dist=Math.hypot(t.clientX-tapCand.sx,t.clientY-tapCand.sy);
+      if(dist>TAP_MOVE)promoteSteer(tapCand);
+    }else{mx=t.clientX;my=t.clientY;}
+  }
+},{passive:false});
+function tEnd(e){
+  for(const t of e.changedTouches){
+    if(t.identifier===dashTouch){dashTouch=null;mdown=false;}
+    if(t.identifier===steerTouch){
+      if(tapCand&&tapCand.id===t.identifier){
+        const dt=performance.now()-tapCand.t;
+        const dist=Math.hypot(t.clientX-tapCand.sx,t.clientY-tapCand.sy);
+        // short + little move → dash; restore aim so tap doesn't yank direction
+        if(!tapCand.moved&&dt<TAP_MS&&dist<=TAP_MOVE){
+          mx=tapCand.savedMx;my=tapCand.savedMy;dash();
+        }else if(!tapCand.moved){
+          // held in place: start steering toward that spot
+          mx=t.clientX;my=t.clientY;mouseUsed=true;
+        }
+        tapCand=null;
+      }
+      steerTouch=null;
+    }
+  }
+}
 cv.addEventListener('touchend',tEnd);cv.addEventListener('touchcancel',tEnd);
+// promote deferred tap to steer if held past TAP_MS without moving
+setInterval(()=>{
+  if(tapCand&&!tapCand.moved&&steerTouch===tapCand.id&&performance.now()-tapCand.t>=TAP_MS)promoteSteer(tapCand);
+},40);
 function act(kind){
   if(state==='title'){reset(true);return;}
   if(state==='over'){if(overT>0.6)reset(true);return;}
@@ -127,8 +175,9 @@ function targetS(len){return clamp(Math.pow(len/640,0.8),1,2.8);}
 function reset(start){
   const tl=+Q.get('tail')||640;
   P={x:0,y:0,a:0,spd:195,turn:4.0,hp:100,maxHp:100,inv:0,tailLen:tl,dashCd:2.2,dashT:0,dashCdT:0,dashAge:0,ghostT:0,
+     dashBase:0.55,dashHoldMax:0.85,dashStacks:0,
      trail:[{x:0,y:0,s:0}],serial:1,minSerial:0,loopCd:0,S:targetS(tl),stage:stageOf(tl),
-     pulseR:72,pulseDmg:1,pulseInt:1.1,pulseT:0.5,magnet:95,blast:1,lvl:1,xp:0,xpNeed:8};
+     pulseR:72,pulseDmg:1,pulseInt:1.1,pulseT:0.5,magnet:95,blast:1,lvl:1,xp:0,xpNeed:55};
   enemies=[];orbs=[];parts=[];texts=[];rings=[];captures=[];ghosts=[];
   T=0;kills=0;bestCombo=0;spawnT=1.0;shake=0;hitstop=0;choices=null;overT=0;pendingLv=0;flashT=0;banner=null;stageT=0;
   state=start?'play':'title';
@@ -177,10 +226,10 @@ function kill(e,xpMul){
   if(orbs.length<450)orbs.push({x:e.x+rand(-6,6),y:e.y+rand(-6,6),v,ph:Math.random()*TAU,vx:rand(-40,40),vy:rand(-40,40)});
   else addXP(v);
 }
-function addXP(v){P.xp+=v;while(P.xp>=P.xpNeed){P.xp-=P.xpNeed;P.lvl++;P.xpNeed=Math.round(8+P.lvl*5+P.lvl*P.lvl*0.6);pendingLv++;}}
+function addXP(v){P.xp+=v;while(P.xp>=P.xpNeed){P.xp-=P.xpNeed;P.lvl++;P.xpNeed=Math.round(40+P.lvl*10+P.lvl*P.lvl*1.5);pendingLv++;}}
 function dash(){
   if(state!=='play'||P.dashCdT>0)return;
-  P.dashT=0.55;P.dashAge=0;P.dashCdT=P.dashCd;P.ghostT=0;
+  P.dashT=P.dashBase;P.dashAge=0;P.dashCdT=P.dashCd;P.ghostT=0;
   burst(P.x,P.y,22,'#9dffc4',240,0.4,3);
   rings.push({x:P.x,y:P.y,r:6*P.S,R:60*P.S,life:0.3,max:0.3,col:'#d8ffe6',w:4*P.S});
   let any=false;for(const c of captures)if(c.cinchT<0){c.cinchT=0;c.dash=true;any=true;}
@@ -237,6 +286,7 @@ function advanceTrail(dt){
 const UPG=[
  {n:'尾が伸びる',d:'尾の長さ +18%\nスケールアップが早まる',f:()=>P.tailLen=Math.min(MAX_TAIL,P.tailLen*1.18)},
  {n:'ダッシュ回復',d:'ダッシュの\nクールダウン -18%',f:()=>P.dashCd=Math.max(0.6,P.dashCd*0.82)},
+ {n:'ダッシュ延長',d:'ダッシュ時間 +0.12秒\n長押し延長も伸びる',f:()=>{if(P.dashStacks<5){P.dashStacks++;P.dashBase+=0.12;P.dashHoldMax+=0.185;}}},
  {n:'パルス強化',d:'自動パルスの\n範囲+16 / 威力+1',f:()=>{P.pulseR+=16;P.pulseDmg+=1;P.pulseInt=Math.max(0.45,P.pulseInt*0.92);}},
  {n:'締め爆発',d:'締めた時の\n衝撃波 +25%',f:()=>P.blast+=0.25},
  {n:'鞭毛ブースト',d:'移動速度 +8%\n旋回 +8%',f:()=>{P.spd*=1.08;P.turn*=1.08;}},
@@ -245,7 +295,7 @@ const UPG=[
 ];
 function openLevel(){const pool=UPG.slice();choices=[];while(choices.length<3)choices.push(pool.splice(Math.random()*pool.length|0,1)[0]);state='level';if(DEMO)pick(Math.random()*3|0);}
 function pick(i){if(!choices||!choices[i])return;choices[i].f();pendingLv--;choices=null;state='play';
-  P.tailLen=Math.min(MAX_TAIL,P.tailLen*1.08); // tail grows a bit every level
+  P.tailLen=Math.min(MAX_TAIL,P.tailLen*1.105); // tail grows a bit every level
   text(P.x,P.y-40*P.S,'LEVEL UP!',24,'#ffe680',1);burst(P.x,P.y,30,'#ffe680',260,0.7,3);checkStage();}
 function checkStage(){const s=stageOf(P.tailLen);if(s>P.stage){P.stage=s;stageT=T;
   banner={t:2.4,title:'スケールアップ！',sub:STAGES[s]+'の世界へ'};flashT=0.3;shake=Math.max(shake,10);
@@ -275,7 +325,7 @@ function update(dt){
   const tr=P.turn*(P.dashT>0?1.3:1)*dt;P.a+=clamp(angDiff(P.a,desired),-tr,tr);
   const sp=P.spd*S*(P.dashT>0?2.3:1);
   P.x+=Math.cos(P.a)*sp*dt;P.y+=Math.sin(P.a)*sp*dt;
-  if(P.dashT>0){P.dashT-=dt;P.dashAge+=dt;if((mdown||keys.has(' '))&&P.dashAge<0.85)P.dashT=Math.max(P.dashT,0.02);
+  if(P.dashT>0){P.dashT-=dt;P.dashAge+=dt;if((mdown||keys.has(' '))&&P.dashAge<P.dashHoldMax)P.dashT=Math.max(P.dashT,0.02);
     P.ghostT-=dt;if(P.ghostT<=0){P.ghostT=0.04;ghosts.push({x:P.x,y:P.y,a:P.a,life:0.32});}
     if(Math.random()<0.9)burst(P.x-Math.cos(P.a)*12*S,P.y-Math.sin(P.a)*12*S,1,'#b6ffd2',40,0.35,3);}
   if(P.dashCdT>0)P.dashCdT-=dt;
@@ -492,8 +542,8 @@ function titleScreen(){
   ctx.fillStyle='rgba(2,8,22,0.72)';ctx.fillRect(0,0,W,H);ctx.textAlign='center';ctx.textBaseline='middle';
   const fs=Math.min(18,(W-30)/19);
   fitFont('コイル・バクテリア',56,900,W-30);ctx.fillStyle='#7dffb0';ctx.fillText('コイル・バクテリア',W/2,H/2-140);
-  ctx.font=`${Math.min(14,fs)}px ${FONT}`;ctx.fillStyle='#8fb8d8';ctx.fillText('らせんで囲って、ダッシュで締める（試作 v3）',W/2,H/2-100);
-  const L=TOUCH?['指でなぞった方向へ進む','尾で敵を囲む（何周も巻くとチャージUP）','右下の DASH ボタンで締める（長押しで延長）','尾が伸びると世界が引いていく：細菌→細胞→細胞核','頭だけが弱点。尾は無敵']
+  ctx.font=`${Math.min(14,fs)}px ${FONT}`;ctx.fillStyle='#8fb8d8';ctx.fillText('らせんで囲って、ダッシュで締める（試作 v4）',W/2,H/2-100);
+  const L=TOUCH?['指でなぞった方向へ進む','尾で敵を囲む（何周も巻くとチャージUP）','短タップ / 右下DASH / 2本指でダッシュ（長押しで延長）','尾が伸びると世界が引いていく：細菌→細胞→細胞核','頭だけが弱点。尾は無敵']
                :['マウスで移動（WASD / 矢印キーでもOK）','尾で敵を囲む（何周も巻くとチャージUP）','クリック or スペースでダッシュして締める（長押しで延長）','尾が伸びると世界が引いていく：細菌→細胞→細胞核','頭だけが弱点。尾は無敵、敵はすり抜ける'];
   ctx.fillStyle='#e8f6ff';L.forEach((l,i)=>{fitFont(l,fs|0,'bold',W-24);ctx.fillText(l,W/2,H/2-44+i*(fs*1.9));});
   ctx.font=`900 22px ${FONT}`;ctx.fillStyle=Math.floor(performance.now()/450)%2?'#ffffff':'#7dffb0';ctx.fillText(TOUCH?'タップでスタート':'クリックでスタート',W/2,H/2-44+L.length*fs*1.9+40);
@@ -533,6 +583,7 @@ function frame(now){
 }
 requestAnimationFrame(frame);
 window.__g={get s(){return{state,T,kills,bestCombo,enemies:enemies.length,orbs:orbs.length,lvl:P.lvl,hp:P.hp,captures:captures.length,
-  tail:Math.round(P.tailLen),S:+P.S.toFixed(2),stage:P.stage,touch:TOUCH,dashT:+P.dashT.toFixed(2),types:[...new Set(enemies.map(e=>e.t.k))].join(',')};}};
+  tail:Math.round(P.tailLen),S:+P.S.toFixed(2),stage:P.stage,touch:TOUCH,dashT:+P.dashT.toFixed(2),dashCdT:+P.dashCdT.toFixed(2),dashBase:P.dashBase,dashStacks:P.dashStacks,xpNeed:P.xpNeed,xp:P.xp,
+  a:+P.a.toFixed(3),mx,my,types:[...new Set(enemies.map(e=>e.t.k))].join(',')};},get P(){return P;},dash,addXP};
 })();
 </script></body></html>
